@@ -1801,6 +1801,12 @@ replacement expressed through intervals \<= 8 within parentheses, without leadin
 `added_tones` reflects only those non-chord tones that were added using, again within parentheses,
 intervals preceded by + or/and greater than 8.
 
+#### Replacement-tone validation
+
+The `ms3 review` command preserves the label, its stored expansion, the expansion recomputed by the running `ms3` version, and the tonal pitch classes whose note onsets occur in the corresponding score segment as separate evidence. Reviewed tables include `replacement_validation_status`, `expansion_reproduction_status`, `replacement_score_evidence_scope`, `stored_chord_tpcs`, `recomputed_chord_tpcs`, `asserted_replacement_tpcs`, `observed_tpcs`, and `missing_replacement_tpcs`.
+
+When a label asserts a replacement tone with no onset in the score segment, `ms3 review` emits `DCML_REPLACEMENT_TONE_ABSENT_FROM_SCORE_WARNING`. This warning does not rewrite the label or decide whether the label, expansion semantics, or score is wrong. Users who have expanded harmony and note tables should call `validate_replacement_tones(harmonies, notes)` for the stronger comparison; this table-level validator includes sustained notes and replacement tones entering after the harmony onset. The `replacement_score_evidence_scope` column distinguishes these two evidence scopes.
+
 (chord_type)=
 
 #### **chord_type**

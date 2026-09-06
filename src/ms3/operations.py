@@ -3,7 +3,8 @@ print() instead of log messages from time to time.
 """
 
 import os
-from typing import Dict, Iterator, List, Literal, Optional, Tuple, Union
+from fractions import Fraction
+from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import pandas as pd
 from ms3._typing import AnnotationsFacet, TSVtype, TSVtypes
@@ -20,9 +21,13 @@ from ms3.utils import (
     check_argument_against_literal_type,
     compute_path_from_file,
     fifths2name,
+    features2tpcs,
     make_valid_frictionless_name,
+    name2fifths,
     pretty_dict,
     resolve_facets_param,
+    resolve_relative_keys,
+    roman_numeral2fifths,
     store_dataframe_resource,
     store_dataframes_package,
     tpc2scale_degree,
@@ -32,6 +37,198 @@ from ms3.utils import (
 from ms3.utils.constants import LATEST_MUSESCORE_VERSION
 
 module_logger = get_logger(__name__)
+
+
+def _replacement_expansion(row: pd.Series) -> Dict[str, Any]:
+    """Recompute one label's replacement and complete chord-tone expansion."""
+    changes = row.get("changes")
+    if pd.isnull(changes) or not str(changes):
+        return {
+            "asserted_replacement_tpcs": tuple(),
+            "recomputed_chord_tpcs": tuple(),
+            "stored_tpc_offset": 0,
+        }
+    root = row.get("root")
+    if pd.isnull(root):
+        return {
+            "asserted_replacement_tpcs": tuple(),
+            "recomputed_chord_tpcs": tuple(),
+            "stored_tpc_offset": 0,
+        }
+
+    def optional(name: str):
+        value = row.get(name)
+        return None if pd.isnull(value) else value
+
+    parameters = {
+        "numeral": row.get("numeral"),
+        "form": optional("form"),
+        "figbass": optional("figbass"),
+        "relativeroot": optional("relativeroot"),
+        "key": "c" if bool(row.get("localkey_is_minor")) else "C",
+        "merge_tones": False,
+    }
+    expanded = features2tpcs(changes=changes, **parameters)
+    underlying = features2tpcs(changes=None, **parameters)
+    if pd.isnull(expanded["root"]):
+        return {
+            "asserted_replacement_tpcs": tuple(),
+            "recomputed_chord_tpcs": tuple(),
+            "stored_tpc_offset": 0,
+        }
+    replacement_relative = set(expanded["chord_tones"]) - set(
+        underlying["chord_tones"]
+    )
+    globalkey, localkey = row.get("globalkey"), row.get("localkey")
+    if (
+        isinstance(globalkey, str)
+        and globalkey
+        and isinstance(localkey, str)
+        and localkey
+    ):
+        global_minor = globalkey.islower()
+        resolved_localkey = resolve_relative_keys(localkey, global_minor)
+        local_tonic = name2fifths(globalkey) + roman_numeral2fifths(
+            resolved_localkey, global_minor
+        )
+    else:
+        local_tonic = int(root) - int(expanded["root"])
+    return {
+        "asserted_replacement_tpcs": tuple(
+            sorted(local_tonic + tone for tone in replacement_relative)
+        ),
+        "recomputed_chord_tpcs": tuple(
+            sorted(local_tonic + tone for tone in expanded["chord_tones"])
+        ),
+        "stored_tpc_offset": (
+            local_tonic if int(root) == int(expanded["root"]) else 0
+        ),
+    }
+
+
+def _stored_chord_tones(value) -> Tuple[int, ...]:
+    if isinstance(value, str):
+        return tuple(
+            sorted(int(part.strip()) for part in value.split(",") if part.strip())
+        )
+    if isinstance(value, (list, set, tuple)):
+        return tuple(sorted(int(tone) for tone in value))
+    return tuple()
+
+
+def replacement_tone_evidence(row: pd.Series) -> Dict[str, Any]:
+    """Return provenance-preserving score evidence for one expanded label.
+
+    The expanded label and the observed score spellings remain separate. This
+    function classifies their relationship but never rewrites either source.
+    """
+    expansion = _replacement_expansion(row)
+    asserted = expansion["asserted_replacement_tpcs"]
+    recomputed = expansion["recomputed_chord_tpcs"]
+    stored = _stored_chord_tones(row.get("chord_tones"))
+    if stored:
+        stored = tuple(
+            sorted(tone + expansion["stored_tpc_offset"] for tone in stored)
+        )
+    observed_value = row.get("observed_tpcs")
+    observed_available = isinstance(observed_value, (list, set, tuple))
+    observed = tuple(sorted(set(observed_value))) if observed_available else tuple()
+    evidence_scope = row.get("replacement_score_evidence_scope")
+    if pd.isnull(evidence_scope):
+        evidence_scope = "unspecified"
+    missing = (
+        tuple(sorted(set(asserted) - set(observed)))
+        if observed_available
+        else tuple()
+    )
+    if not asserted:
+        status = "no_replacement_tones_asserted"
+    elif not observed_available:
+        status = "score_segment_unavailable"
+    elif missing:
+        status = "replacement_tone_absent_from_score_segment"
+    else:
+        status = "replacement_tones_confirmed_in_score_segment"
+    if not stored or not recomputed:
+        expansion_status = "stored_expansion_unavailable"
+    elif stored == recomputed:
+        expansion_status = "stored_expansion_matches_current_ms3"
+    else:
+        expansion_status = "stored_expansion_differs_from_current_ms3"
+    return {
+        "replacement_validation_status": status,
+        "expansion_reproduction_status": expansion_status,
+        "stored_chord_tpcs": stored,
+        "recomputed_chord_tpcs": recomputed,
+        "asserted_replacement_tpcs": asserted,
+        "observed_tpcs": observed,
+        "missing_replacement_tpcs": missing,
+        "replacement_score_evidence_scope": evidence_scope,
+    }
+
+
+def missing_replacement_tones(row: pd.Series) -> Tuple[int, ...]:
+    """Return replacement tones asserted by a label but absent from its score segment."""
+    return replacement_tone_evidence(row)["missing_replacement_tpcs"]
+
+
+def validate_replacement_tones(
+    harmonies: pd.DataFrame, notes: pd.DataFrame
+) -> pd.DataFrame:
+    """Compare expanded replacement tones with all notes sounding in each segment.
+
+    A note is observed when any part of its duration overlaps the harmony
+    segment. This includes notes sustained across the segment boundary and
+    replacement tones that enter after the harmony onset.
+    """
+
+    def as_fraction(value) -> Fraction:
+        return Fraction(str(value))
+
+    required_harmony = {"quarterbeats", "duration_qb"}
+    required_notes = {"quarterbeats", "duration_qb", "tpc"}
+    missing_harmony = required_harmony - set(harmonies.columns)
+    missing_notes = required_notes - set(notes.columns)
+    if missing_harmony or missing_notes:
+        raise ValueError(
+            "Replacement-tone validation requires harmony columns "
+            f"{sorted(required_harmony)} and note columns {sorted(required_notes)}; "
+            f"missing harmony columns {sorted(missing_harmony)}, "
+            f"missing note columns {sorted(missing_notes)}."
+        )
+
+    result = harmonies.copy()
+    observed_by_row = []
+    for harmony in result.itertuples(index=False):
+        start = as_fraction(harmony.quarterbeats)
+        end = start + as_fraction(harmony.duration_qb)
+        observed = set()
+        for note in notes.itertuples(index=False):
+            try:
+                note_start = as_fraction(note.quarterbeats)
+                note_end = note_start + as_fraction(note.duration_qb)
+            except (TypeError, ValueError, ZeroDivisionError):
+                continue
+            if min(end, note_end) <= max(start, note_start):
+                continue
+            try:
+                observed.add(int(note.tpc))
+            except (TypeError, ValueError):
+                continue
+        observed_by_row.append(tuple(sorted(observed)))
+    result["observed_tpcs"] = pd.Series(observed_by_row, index=result.index)
+    result["replacement_score_evidence_scope"] = "all_notes_overlapping_harmony_segment"
+    evidence = result.apply(replacement_tone_evidence, axis=1)
+    for column in (
+        "replacement_validation_status",
+        "expansion_reproduction_status",
+        "stored_chord_tpcs",
+        "recomputed_chord_tpcs",
+        "asserted_replacement_tpcs",
+        "missing_replacement_tpcs",
+    ):
+        result[column] = evidence.map(lambda item: item[column])
+    return result
 
 
 def insert_labels_into_score(
@@ -715,8 +912,36 @@ def make_coloring_reports_and_warnings(
                     f"This coloring report has been overwritten because several scores have the same piece:\n"
                     f"{report_file}"
                 )
+            replacement_evidence = report.apply(replacement_tone_evidence, axis=1)
+            for column in (
+                "replacement_validation_status",
+                "expansion_reproduction_status",
+                "stored_chord_tpcs",
+                "recomputed_chord_tpcs",
+                "asserted_replacement_tpcs",
+                "missing_replacement_tpcs",
+                "replacement_score_evidence_scope",
+            ):
+                report[column] = replacement_evidence.map(lambda item: item[column])
             write_tsv(report, report_file)
             is_first = False
+            for index, missing in report.missing_replacement_tpcs.items():
+                if not missing:
+                    continue
+                t = report.loc[index]
+                message_id = (33, t.mc, str(t.mc_onset), t.label)
+                if message_id in ignored_warning_ids:
+                    continue
+                test_passes = False
+                piece_logger.warning(
+                    f"The label '{t.label}' in m. {t.mn}, onset {t.mn_onset} "
+                    f"(MC {t.mc}, onset {t.mc_onset}) asserts replacement tone(s) "
+                    f"{fifths2name(missing)}, but none begins in the corresponding "
+                    "score segment. Check sustained notes with validate_replacement_tones(), "
+                    "check the replacement syntax, or add this warning "
+                    "to IGNORED_WARNINGS with a comment if the analytical spelling is intentional.",
+                    extra={"message_id": message_id},
+                )
             warning_selection = (
                 report.count_ratio > threshold
             ) & report.chord_tones.notna()

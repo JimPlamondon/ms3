@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+* adds provenance-preserving validation for replacement tones asserted by DCML harmony labels but absent from the corresponding score segment
+* adds machine-readable replacement-validation evidence to `ms3 review` reports without rewriting the source label or its expansion
+
 ## [2.6.3](https://github.com/johentsch/ms3/compare/v2.6.2...v2.6.3) (2026-07-07)
 
 

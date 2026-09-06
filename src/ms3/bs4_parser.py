@@ -768,7 +768,11 @@ and {loc_after} before the subsequent {nxt_name}."""
         color_g: Optional[int] = None,
         color_b: Optional[int] = None,
         color_a: Optional[int] = None,
-    ) -> Tuple[List[Fraction], List[Fraction]]:
+        return_tpcs: bool = False,
+    ) -> Union[
+        Tuple[List[Fraction], List[Fraction]],
+        Tuple[List[Fraction], List[Fraction], Tuple[int, ...]],
+    ]:
         """Colors all notes occurring in a particular score segment in one particular color, or
         only those (not) pertaining to a collection of MIDI pitches or Tonal Pitch Classes (TPC).
 
@@ -798,6 +802,7 @@ and {loc_after} before the subsequent {nxt_name}."""
         Returns:
           List of durations (in fractions) of all notes that have been colored.
           List of durations (in fractions) of all notes that have not been colored.
+          If ``return_tpcs`` is true, a third value contains the observed tonal pitch classes.
         """
         if len(self.tags) == 0:
             if self.read_only:
@@ -823,6 +828,7 @@ and {loc_after} before the subsequent {nxt_name}."""
         until_end = pd.isnull(to_mc)
         negation = " not" if inverse else ""
         colored_durations, untouched_durations = [], []
+        observed_tpcs = set()
         for mc, staves in self.tags.items():
             if mc < from_mc or (not until_end and mc > to_mc):
                 continue
@@ -838,6 +844,7 @@ and {loc_after} before the subsequent {nxt_name}."""
                                 continue
                             duration = tag_dict["duration"]
                             for note_tag in tag_dict["tag"].find_all("Note"):
+                                observed_tpcs.add(int(note_tag.tpc.string) - 14)
                                 reason = ""
                                 if len(midi) > 0:
                                     midi_val = note_tag.pitch.string
@@ -876,7 +883,10 @@ and {loc_after} before the subsequent {nxt_name}."""
                                     f"MC {mc}, onset {onset}, staff {staff}, voice {voice}: Changed note color to "
                                     f"{color_name}{reason}."
                                 )
-        return colored_durations, untouched_durations
+        result = colored_durations, untouched_durations
+        if return_tpcs:
+            return result + (tuple(sorted(observed_tpcs)),)
+        return result
 
     def delete_label(self, mc, staff, voice, mc_onset, empty_only=False):
         """Delete a label from a particular position (if there is one).

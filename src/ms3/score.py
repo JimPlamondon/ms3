@@ -775,15 +775,16 @@ class MSCX(LoggedClass):
             ]
             if all(pd.isnull(ctt) for ctt in chord_tone_tuples):
                 if color_nan:
-                    colored_durs, untouched_durs = self.parsed.color_notes(
+                    colored_durs, untouched_durs, observed_tpcs = self.parsed.color_notes(
                         from_mc=mc,
                         from_mc_onset=mc_onset,
                         to_mc=to_mc,
                         to_mc_onset=to_mc_onset,
                         color_name=color_name,
+                        return_tpcs=True,
                     )
                 else:
-                    colored_durs, untouched_durs = [], []
+                    colored_durs, untouched_durs, observed_tpcs = [], [], tuple()
                     expand_segment = True
             else:
                 chord_tones = tuple(
@@ -794,7 +795,7 @@ class MSCX(LoggedClass):
                         if not pd.isnull(ctt)
                     ]
                 )
-                colored_durs, untouched_durs = self.parsed.color_notes(
+                colored_durs, untouched_durs, observed_tpcs = self.parsed.color_notes(
                     from_mc=mc,
                     from_mc_onset=mc_onset,
                     to_mc=to_mc,
@@ -802,6 +803,7 @@ class MSCX(LoggedClass):
                     color_name=color_name,
                     tpc=chord_tones,
                     inverse=True,
+                    return_tpcs=True,
                 )
             n_colored, n_untouched = len(colored_durs), len(untouched_durs)
             if n_colored + n_untouched == 0:
@@ -827,6 +829,7 @@ class MSCX(LoggedClass):
                         dur_colored,
                         dur_untouched,
                         dur_ratio,
+                        observed_tpcs,
                     )
                 )
             if expand_segment:
@@ -842,8 +845,12 @@ class MSCX(LoggedClass):
                 "dur_colored",
                 "dur_untouched",
                 "dur_ratio",
+                "observed_tpcs",
             ],
             index=df.index,
+        )
+        stats["replacement_score_evidence_scope"] = (
+            "note_onsets_within_harmony_segment"
         )
         stats = stats.astype(dict(n_colored="Int64", n_untouched="Int64"))
         if (stats.n_colored > 0).any():
